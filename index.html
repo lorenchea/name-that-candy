@@ -121,8 +121,9 @@ footer{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;color:
 <div class="phone" id="phone" hidden>
   <h1>Name That <span>Candy</span></h1>
   <div id="codeStep" hidden>
-    <p class="note">Enter the code on the big screen</p>
-    <form class="codeIn" id="codeForm"><input id="codeInput" maxlength="4" autocomplete="off" autocapitalize="characters" inputmode="text" aria-label="Game code"><button class="primary">Join</button></form>
+    <p class="note">Enter the 4-letter code on the big screen</p>
+    <form class="codeIn" id="codeForm" style="margin-top:12px"><input id="codeInput" maxlength="4" autocomplete="off" autocapitalize="characters" inputmode="text" aria-label="Game code"><button class="primary">Join</button></form>
+    <p class="note" style="margin-top:28px;font-size:13px"><a href="?host" style="color:var(--muted)">Run the big-screen board on this device instead</a></p>
   </div>
   <div id="playStep" hidden style="display:flex;flex-direction:column;gap:18px">
     <div>
@@ -152,7 +153,9 @@ const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const ls={get(k){try{return localStorage.getItem(k)}catch(e){return null}},set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
 const params=new URLSearchParams(location.search);
-const IS_PHONE=params.has("join");
+// Phones get the join screen by default; ?host forces the board, ?join forces the buzzer.
+const looksLikePhone=window.matchMedia("(pointer:coarse)").matches&&Math.min(screen.width,screen.height)<700;
+const IS_PHONE=params.has("join")||(!params.has("host")&&looksLikePhone);
 const baseUrl=location.origin+location.pathname;
 
 /* =============== HOST =============== */
