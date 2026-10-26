@@ -137,7 +137,7 @@ footer{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;color:
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
 <script>
 const CLUES=[
  ["easy","🍬🌽","Candy Corn"],["easy","🐟🇸🇪","Swedish Fish"],["easy","⭐💥","Starburst"],["easy","🧰🐱","Kit Kat"],
@@ -148,21 +148,41 @@ const CLUES=[
  ["hard","⛰️⛰️","Mounds"],["hard","🤭","Snickers"],["hard","😂🍬","Laffy Taffy"]
 ];
 const PTS={easy:1,medium:2,hard:3};
-const PREFIX="name-that-candy-una-";
+// Two independent free public relays; everything is sent through both, so either one being up is enough.
+const BROKERS=["wss://broker.hivemq.com:8884/mqtt","wss://broker.emqx.io:8084/mqtt"];
+const NS="name-that-candy-una-v2/";
+const topicState=c=>NS+c+"/state";
+const topicUp=c=>NS+c+"/up";
 const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const ls={get(k){try{return localStorage.getItem(k)}catch(e){return null}},set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
+const ss={get(k){try{return sessionStorage.getItem(k)}catch(e){return null}},set(k,v){try{sessionStorage.setItem(k,v)}catch(e){}}};
+const rid=n=>{const a="abcdefghijkmnpqrstuvwxyz23456789";let s="";const r=crypto.getRandomValues(new Uint8Array(n));for(const x of r)s+=a[x%a.length];return s};
 const params=new URLSearchParams(location.search);
 // Phones get the join screen by default; ?host forces the board, ?join forces the buzzer.
 const looksLikePhone=window.matchMedia("(pointer:coarse)").matches&&Math.min(screen.width,screen.height)<700;
 const IS_PHONE=params.has("join")||(!params.has("host")&&looksLikePhone);
 const baseUrl=location.origin+location.pathname;
+function connectBroker(clientTag){
+  const cs=BROKERS.map(u=>mqtt.connect(u,{clientId:"ntc-"+clientTag+"-"+rid(8),clean:true,reconnectPeriod:2500,connectTimeout:8000,keepalive:20}));
+  return {
+    get connected(){return cs.some(c=>c.connected)},
+    on(ev,fn){cs.forEach(c=>c.on(ev,fn));return this},
+    removeListener(ev,fn){cs.forEach(c=>c.removeListener(ev,fn))},
+    publish(t,m,o){cs.forEach(c=>{if(c.connected)c.publish(t,m,o||{})})},
+    subscribe(t,cb){cs.forEach(c=>{if(c.connected)c.subscribe(t)});if(cb)setTimeout(cb,0)},
+    unsubscribe(t){cs.forEach(c=>{if(c.connected)c.unsubscribe(t)})},
+    end(f){cs.forEach(c=>c.end(f))}
+  };
+}
 
 /* =============== HOST =============== */
 const fresh=()=>({i:0,revealed:false,awarded:{},clear:0,teams:[{name:"Team 1",score:0},{name:"Team 2",score:0}]});
-let S, order=[], roundId="", conns=new Map(); // peerId -> {conn, team}
+let S, order=[], roundId="";
+let phones=new Map();      // phoneId -> {team, seen}
+let kicked=new Set(), locked=false, client=null, code=null, online=false;
 
-function newCode(){const a="ABCDEFGHJKMNPQRSTUVWXYZ";let s="";for(let i=0;i<4;i++)s+=a[Math.floor(Math.random()*a.length)];return s}
+function newCode(){const a="ABCDEFGHJKMNPQRSTUVWXYZ";let s="";const r=crypto.getRandomValues(new Uint8Array(4));for(const x of r)s+=a[x%a.length];return s}
 const currentRound=()=>`${S.i}-${S.clear||0}`;
 const buzzOpen=()=>S.i<CLUES.length&&!S.revealed;
 function syncRound(){const r=currentRound();if(r!==roundId){roundId=r;order=[]}}
@@ -203,20 +223,19 @@ function render(){
   }
   renderScores();save();broadcast();
 }
+function claimOf(team){for(const [id,p] of phones)if(p.team===team)return id;return null}
 function renderScores(){
   const top=Math.max(...S.teams.map(t=>t.score));
-  const counts={};for(const c of conns.values())if(c.team!=null)counts[c.team]=(counts[c.team]||0)+1;
-  $("scores").innerHTML=S.teams.map((t,k)=>{const n=counts[k]||0;return `<div class="team ${t.score===top&&top>0?"lead":""}">
+  $("scores").innerHTML=S.teams.map((t,k)=>{const has=claimOf(k)!=null;return `<div class="team ${t.score===top&&top>0?"lead":""}">
     <input id="team-${k}" aria-label="Team name" value="${esc(t.name)}" data-k="${k}">
     <div class="pts">${t.score}</div>
     <div class="adj"><button data-up="${k}" aria-label="Add point">+</button><button data-dn="${k}" aria-label="Remove point">−</button></div>
-    <div class="who ${n?"on":""}">${n?`📱 Buzzer connected<button class="kick" data-kick="${k}">Remove</button>`:"No buzzer yet"}</div></div>`}).join("");
-  $("scores").querySelectorAll("[data-kick]").forEach(b=>b.onclick=()=>{
-    for(const [id,o] of conns)if(o.team===+b.dataset.kick){try{o.conn.send({type:"removed"})}catch(e){}setTimeout(()=>o.conn.close(),300);conns.delete(id)}
-    render()});
+    <div class="who ${has?"on":""}">${has?`📱 Buzzer connected<button class="kick" data-kick="${k}">Remove</button>`:"No buzzer yet"}</div></div>`}).join("");
   $("scores").querySelectorAll("input").forEach(inp=>inp.onchange=()=>{S.teams[inp.dataset.k].name=inp.value||`Team ${+inp.dataset.k+1}`;render()});
   $("scores").querySelectorAll("[data-up]").forEach(b=>b.onclick=()=>{S.teams[b.dataset.up].score++;render()});
   $("scores").querySelectorAll("[data-dn]").forEach(b=>b.onclick=()=>{S.teams[b.dataset.dn].score--;render()});
+  $("scores").querySelectorAll("[data-kick]").forEach(b=>b.onclick=()=>{
+    const id=claimOf(+b.dataset.kick);if(id){kicked.add(id);phones.delete(id)}render()});
 }
 function reveal(){S.revealed=true;render()}
 function go(d){S.i=Math.max(0,Math.min(CLUES.length,S.i+d));S.revealed=S.awarded[S.i]!=null;render()}
@@ -232,66 +251,80 @@ function ding(){try{actx=actx||new (window.AudioContext||window.webkitAudioConte
   [880,1320].forEach((f,i)=>{const o=actx.createOscillator(),g=actx.createGain();o.type="square";o.frequency.value=f;o.connect(g);g.connect(actx.destination);
   const t=actx.currentTime+i*.12;g.gain.setValueAtTime(.12,t);g.gain.exponentialRampToValueAtTime(.001,t+.3);o.start(t);o.stop(t+.3)})}catch(e){}}
 
-function stateMsg(){return {type:"state",round:roundId,open:buzzOpen(),teams:S.teams.map(t=>t.name),order}}
-function broadcast(){const m=stateMsg();for(const c of conns.values()){try{c.conn.open&&c.conn.send(m)}catch(e){}}}
+function stateMsg(){
+  const claims={};for(const [id,p] of phones)if(p.team!=null)claims[id]=p.team;
+  return {ts:Date.now(),round:roundId,open:buzzOpen(),teams:S.teams.map(t=>t.name),order,claims,locked,kicked:[...kicked].slice(-20)};
+}
+function broadcast(){if(client&&client.connected)client.publish(topicState(code),JSON.stringify(stateMsg()),{qos:0,retain:true})}
 
-function onPhoneData(id,d){
-  const c=conns.get(id);if(!c||!d||typeof d!=="object")return;
-  if(typeof d.team==="number"&&S.teams[d.team]&&c.team!==d.team){
-    const taken=[...conns.entries()].some(([id2,o])=>id2!==id&&o.team===d.team);
-    if(taken){try{c.conn.send({type:"taken",team:d.team})}catch(e){}return}
-    c.team=d.team;
+function onUp(raw){
+  let d;try{d=JSON.parse(raw)}catch(e){return}
+  if(!d||typeof d.from!=="string"||d.from.length>40||kicked.has(d.from))return;
+  let p=phones.get(d.from);
+  if(!p){ if(locked)return; p={team:null,seen:0}; phones.set(d.from,p) }
+  p.seen=Date.now();
+  if(typeof d.team==="number"&&S.teams[d.team]&&p.team!==d.team){
+    const other=claimOf(d.team);
+    if(other==null||other===d.from)p.team=d.team;
   }
   if(d.type==="buzz"){
     syncRound();
-    if(buzzOpen()&&d.round===roundId&&c.team!=null&&!order.includes(c.team)){
-      order.push(c.team);if(order.length===1)ding();
+    if(buzzOpen()&&d.round===roundId&&p.team!=null&&!order.includes(p.team)){
+      order.push(p.team);if(order.length===1)ding();
     }
   }
   render();
 }
-
-let peer=null, locked=false;
-function setLock(v){locked=v;$("lockBtn").textContent=v?"🔒 Joining locked":"🔓 Lock joining";
-  $("lockBtn").classList.toggle("locked",v);document.querySelector(".joinPanel").classList.toggle("locked",v)}
 function setNet(on,text){$("netDot").className="dot"+(on?" on":"");$("netText").textContent=text}
-function startPeer(code){
-  peer=new Peer(PREFIX+code);
-  peer.on("open",()=>setNet(true,"Ready for phones"));
-  peer.on("connection",conn=>{
-    if(locked){conn.on("open",()=>{try{conn.send({type:"locked"})}catch(e){}setTimeout(()=>conn.close(),500)});return}
-    conns.set(conn.peer,{conn,team:null});
-    conn.on("open",()=>{conn.send(stateMsg());renderScores()});
-    conn.on("data",d=>onPhoneData(conn.peer,d));
-    conn.on("close",()=>{conns.delete(conn.peer);renderScores()});
-    conn.on("error",()=>{});
-  });
-  peer.on("disconnected",()=>{setNet(false,"Reconnecting…");setTimeout(()=>{try{peer.reconnect()}catch(e){}},1500)});
-  peer.on("error",err=>{
-    if(err.type==="unavailable-id"){ // code taken (e.g. old tab still open) — pick a new one
-      peer.destroy();const c=newCode();try{sessionStorage.setItem("ntc-code",c)}catch(e){}showJoin(c);startPeer(c);return;
-    }
-    setNet(false,"Connection problem: "+err.type);
-  });
-}
-function showJoin(code){
+function setLock(v){locked=v;$("lockBtn").textContent=v?"🔒 Joining locked":"🔓 Lock joining";
+  $("lockBtn").classList.toggle("locked",v);document.querySelector(".joinPanel").classList.toggle("locked",v);render()}
+function showJoin(){
   $("roomCode").textContent=code;
   $("joinUrl").textContent=baseUrl.replace(/^https?:\/\//,"");
   $("qr").innerHTML="";
   new QRCode($("qr"),{text:`${baseUrl}?join=${code}`,width:360,height:360,colorDark:"#2a1630",colorLight:"#ffffff",correctLevel:QRCode.CorrectLevel.M});
 }
+function hostConnect(){
+  client=connectBroker("host");
+  let checked=false;
+  client.on("connect",()=>{
+    online=true;
+    if(!checked){
+      // make sure nobody else is live on this code; if so, pick another
+      checked=true;let busy=false;
+      const t=topicState(code);
+      const probe=(top,msg)=>{if(top!==t)return;try{const d=JSON.parse(msg.toString());if(d.ts&&Date.now()-d.ts<20000)busy=true}catch(e){}};
+      client.on("message",probe);
+      client.subscribe(t,()=>setTimeout(()=>{
+        client.removeListener("message",probe);client.unsubscribe(t);
+        if(busy){code=newCode();ss.set("ntc-code",code);showJoin()}
+        client.on("message",(top,msg)=>{if(top===topicUp(code))onUp(msg.toString())});
+        client.subscribe(topicUp(code));
+        setNet(true,"Ready for phones");broadcast();
+      },1500));
+    }else{client.subscribe(topicUp(code));setNet(true,"Ready for phones");broadcast()}
+  });
+  client.on("offline",()=>{online=client.connected;if(!online)setNet(false,"Offline – reconnecting…")});
+  setInterval(()=>{ // heartbeat + drop silent phones
+    const now=Date.now();let changed=false;
+    for(const [id,p] of phones)if(now-p.seen>20000){phones.delete(id);changed=true}
+    changed?render():broadcast();
+  },5000);
+  window.addEventListener("pagehide",()=>{try{client.publish(topicState(code),"",{retain:true})}catch(e){}});
+}
 function startHost(){
   $("host").hidden=false;
   try{S=JSON.parse(ls.get("ntc-state"))}catch(e){}
   if(!S||!Array.isArray(S.teams))S=fresh();
-  let code=null;try{code=sessionStorage.getItem("ntc-code")}catch(e){}
-  if(!code){code=newCode();try{sessionStorage.setItem("ntc-code",code)}catch(e){}}
-  showJoin(code);
+  code=ss.get("ntc-code");if(!code){code=newCode();ss.set("ntc-code",code)}
+  showJoin();
   $("addTeam").onclick=()=>{if(S.teams.length<6){S.teams.push({name:`Team ${S.teams.length+1}`,score:0});render()}};
-  $("removeTeam").onclick=()=>{if(S.teams.length>1){const k=S.teams.length-1;for(const q in S.awarded)if(S.awarded[q]===k)delete S.awarded[q];S.teams.pop();render()}};
+  $("removeTeam").onclick=()=>{if(S.teams.length>1){const k=S.teams.length-1;for(const q in S.awarded)if(S.awarded[q]===k)delete S.awarded[q];
+    for(const p of phones.values())if(p.team===k)p.team=null;S.teams.pop();render()}};
   let armed=false;
   $("reset").onclick=e=>{if(!armed){armed=true;e.target.textContent="Click again to reset";setTimeout(()=>{armed=false;e.target.textContent="New game"},2500)}
     else{const names=S.teams.map(t=>t.name);S=fresh();S.teams=names.map(n=>({name:n,score:0}));armed=false;e.target.textContent="New game";render()}};
+  $("lockBtn").onclick=()=>setLock(!locked);
   document.addEventListener("keydown",e=>{
     if(e.target.tagName==="INPUT")return;
     if(e.key===" "){e.preventDefault();S.revealed?go(1):reveal()}
@@ -300,53 +333,57 @@ function startHost(){
     else if(e.key==="c"||e.key==="C")clearBuzzes();
     else if(/^[1-6]$/.test(e.key)&&S.revealed&&S.i<CLUES.length&&S.teams[e.key-1])award(String(e.key-1));
   });
-  $("lockBtn").onclick=()=>setLock(!locked);
   render();
-  if(window.Peer)startPeer(code);else setNet(false,"Couldn't load buzzer service");
+  if(window.mqtt)hostConnect();else setNet(false,"Couldn't load buzzer service – check internet");
 }
 
 /* =============== PHONE =============== */
-const P={code:null,team:null,state:null,buzzed:null,conn:null,peer:null,stopped:false};
-function stopPhone(msg){P.stopped=true;P.state=null;$("pStatus").textContent="";$("buzzBtn").disabled=true;$("teamPick").innerHTML="";$("pNote").textContent=msg;try{P.peer.destroy()}catch(e){}}
+const P={code:null,id:null,team:null,state:null,buzzed:null,client:null,stopped:false,lastTs:0};
+function stopPhone(msg){P.stopped=true;$("pStatus").textContent="";$("buzzBtn").disabled=true;$("teamPick").innerHTML="";$("pNote").textContent=msg;try{P.client.end(true)}catch(e){}}
+function send(m){if(P.client&&P.client.connected&&!P.stopped)P.client.publish(topicUp(P.code),JSON.stringify({...m,from:P.id}))}
 function phoneConnect(){
   $("codeStep").hidden=true;$("playStep").hidden=false;
-  if(!window.Peer){$("pNote").textContent="Couldn't load. Check your connection and refresh.";return}
+  if(!window.mqtt){$("pNote").textContent="Couldn't load. Check your connection and refresh.";return}
+  P.id=ss.get("ntc-pid")||rid(12);ss.set("ntc-pid",P.id);
   const t=ls.get("ntc-team");P.team=(t==null||t==="")?null:+t;
-  P.peer=new Peer();
-  P.peer.on("open",dial);
-  P.peer.on("error",err=>{
-    if(err.type==="peer-unavailable"){$("pNote").textContent="Can't find that game. Check the code on the big screen.";P.state=null;renderPhone();setTimeout(dial,3000)}
-    else if(err.type==="network"||err.type==="server-error"||err.type==="socket-error"){$("pNote").textContent="Reconnecting…";setTimeout(()=>{try{P.peer.reconnect()}catch(e){}},2000)}
-  });
-  P.peer.on("disconnected",()=>setTimeout(()=>{try{P.peer.reconnect()}catch(e){}},1500));
-}
-function dial(){
-  if(P.stopped||!P.peer||P.peer.destroyed)return;
-  const conn=P.peer.connect(PREFIX+P.code,{reliable:true});
-  P.conn=conn;
-  conn.on("open",()=>{if(P.team!=null)conn.send({type:"hello",team:P.team});renderPhone()});
-  conn.on("data",d=>{
-    if(d&&d.type==="locked")return stopPhone("Joining is locked for this game. Ask the host if you need in.");
-    if(d&&d.type==="removed")return stopPhone("The host removed this phone from the game.");
-    if(d&&d.type==="taken"){P.team=null;ls.set("ntc-team","");renderPhone();$("pStatus").textContent="That team already has a buzzer";$("pStatus").style.color="var(--berry)";return}
-    if(!d||d.type!=="state"||!Array.isArray(d.teams))return;
+  P.client=connectBroker("phone");
+  P.client.on("connect",()=>{P.client.subscribe(topicState(P.code));send({type:"hello",team:P.team});renderPhone()});
+  P.client.on("message",(top,msg)=>{
+    if(top!==topicState(P.code))return;
+    const raw=msg.toString();if(!raw){P.state=null;$("pNote").textContent="The big screen closed this game.";renderPhone();return}
+    let d;try{d=JSON.parse(raw)}catch(e){return}
+    if(!d||!Array.isArray(d.teams)||Date.now()-(d.ts||0)>30000)return;
+    P.lastTs=Date.now();
+    if(Array.isArray(d.kicked)&&d.kicked.includes(P.id))return stopPhone("The host removed this phone from the game.");
+    const mine=d.claims&&typeof d.claims[P.id]==="number"?d.claims[P.id]:null;
+    if(d.locked&&mine==null)return stopPhone("Joining is locked for this game. Ask the host if you need in.");
     if(P.state&&P.state.round!==d.round)P.buzzed=null;
-    P.state={round:String(d.round),open:!!d.open,teams:d.teams.slice(0,6).map(String),order:Array.isArray(d.order)?d.order:[]};
+    P.state={round:String(d.round),open:!!d.open,teams:d.teams.slice(0,6).map(String),order:Array.isArray(d.order)?d.order:[],claims:d.claims||{},mine};
     renderPhone();
   });
-  conn.on("close",()=>{if(P.stopped)return;P.state=null;$("pNote").textContent="Reconnecting…";renderPhone();setTimeout(dial,2000)});
+  P.client.on("offline",()=>{if(!P.stopped&&!P.client.connected)$("pNote").textContent="Reconnecting…"});
+  setInterval(()=>{ // heartbeat, and notice if the board went away
+    if(P.stopped)return;
+    send({type:"hello",team:P.team});
+    if(P.client.connected&&Date.now()-P.lastTs>15000){P.state=null;renderPhone();$("pNote").textContent="Can't find that game. Check the code on the big screen."}
+  },5000);
+  setTimeout(()=>{if(!P.state&&!P.stopped)$("pNote").textContent="Can't find that game. Check the code on the big screen."},6000);
 }
-function send(m){try{P.conn&&P.conn.open&&P.conn.send(m)}catch(e){}}
 function renderPhone(){
+  if(P.stopped)return;
   const st=P.state,teams=st?.teams||[];
+  const takenBy=k=>{for(const id in (st?.claims||{}))if(st.claims[id]===k&&id!==P.id)return true;return false};
   $("teamPick").innerHTML=teams.length
-    ?teams.map((n,k)=>`<button data-t="${k}" class="${P.team===k?"on":""}">${esc(n)}</button>`).join("")
+    ?teams.map((n,k)=>`<button data-t="${k}" class="${st.mine===k?"on":""}" ${takenBy(k)?"disabled":""}>${esc(n)}${takenBy(k)?"<br><small>taken</small>":""}</button>`).join("")
     :`<span class="note" style="grid-column:1/-1">Teams appear once you're connected.</span>`;
-  $("teamPick").querySelectorAll("[data-t]").forEach(b=>b.onclick=()=>{P.team=+b.dataset.t;ls.set("ntc-team",String(P.team));send({type:"hello",team:P.team});renderPhone()});
+  $("teamPick").querySelectorAll("[data-t]").forEach(b=>b.onclick=()=>{P.team=+b.dataset.t;ls.set("ntc-team",String(P.team));send({type:"hello",team:P.team});$("pStatus").textContent="Joining…"});
   const btn=$("buzzBtn"),status=$("pStatus"),note=$("pNote");
-  if(!st){btn.disabled=true;status.textContent="";return}
-  if(P.team==null||!teams[P.team]){btn.disabled=true;status.textContent="Pick your team";status.style.color="var(--fg)";note.textContent="";return}
-  const pos=st.order.indexOf(P.team);
+  if(!st){btn.disabled=true;status.textContent="";if(P.client&&P.client.connected&&!P.lastTs)note.textContent="Connecting to the big screen…";return}
+  if(st.mine==null){btn.disabled=true;
+    if(P.team!=null&&takenBy(P.team)){status.textContent="That team already has a buzzer";status.style.color="var(--berry)"}
+    else{status.textContent="Pick your team";status.style.color="var(--fg)"}
+    note.textContent="";return}
+  const pos=st.order.indexOf(st.mine);
   btn.disabled=!st.open||pos>=0||P.buzzed===st.round;
   if(pos>=0){status.textContent=pos===0?"🔔 You're first!":`You're #${pos+1}`;status.style.color=pos===0?"var(--berry)":"var(--caramel)"}
   else if(P.buzzed===st.round){status.textContent="Buzzed…";status.style.color="var(--muted)"}
@@ -357,9 +394,9 @@ function renderPhone(){
 function startPhone(){
   $("phone").hidden=false;
   $("buzzBtn").onclick=()=>{
-    const st=P.state;if(!st||!st.open||P.team==null)return;
+    const st=P.state;if(!st||!st.open||st.mine==null)return;
     P.buzzed=st.round;try{navigator.vibrate&&navigator.vibrate(60)}catch(e){}
-    send({type:"buzz",team:P.team,round:st.round});renderPhone();
+    send({type:"buzz",team:st.mine,round:st.round});renderPhone();
   };
   const c=(params.get("join")||"").trim().toUpperCase();
   if(/^[A-Z]{4}$/.test(c)){P.code=c;phoneConnect()}
