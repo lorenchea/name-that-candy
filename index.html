@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Name That Candy</title>
+<meta http-equiv="Cache-Control" content="no-cache">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lilita+One&family=Nunito:wght@600;800&display=swap">
 <style>
 :root{
@@ -71,6 +72,7 @@ button:disabled{opacity:.45;cursor:default}
 .adj button{padding:0 10px;font-size:15px;line-height:1.4}
 .team.lead{border-color:var(--caramel)}
 footer{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;color:var(--muted);font-size:14px;align-items:center}
+.ver{opacity:.6}
 .final{font-family:var(--display);font-size:clamp(36px,6vw,64px);color:var(--caramel)}
 
 /* phone */
@@ -114,7 +116,7 @@ footer{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;color:
       <button id="removeTeam">− Team</button>
       <button id="reset">New game</button>
     </div>
-    <div>Keys: <b>Space</b> reveal · <b>→ / ←</b> next / back · <b>1–6</b> award · <b>C</b> clear buzzes</div>
+    <div><span class="ver">v3</span> · Keys: <b>Space</b> reveal · <b>→ / ←</b> next / back · <b>1–6</b> award · <b>C</b> clear buzzes</div>
   </footer>
 </div>
 
@@ -133,6 +135,7 @@ footer{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;color:
     <div class="status" id="pStatus" aria-live="assertive"></div>
     <button class="big" id="buzzBtn" disabled>BUZZ</button>
     <p class="note" id="pNote">Connecting to the big screen…</p>
+    <p class="note ver" style="font-size:12px">v3</p>
   </div>
 </div>
 
