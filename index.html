@@ -116,7 +116,7 @@ footer{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;color:
       <button id="removeTeam">− Team</button>
       <button id="reset">New game</button>
     </div>
-    <div><span class="ver">v3</span> · Keys: <b>Space</b> reveal · <b>→ / ←</b> next / back · <b>1–6</b> award · <b>C</b> clear buzzes</div>
+    <div><span class="ver">v4</span> · Keys: <b>Space</b> reveal · <b>→ / ←</b> next / back · <b>1–6</b> award · <b>C</b> clear buzzes</div>
   </footer>
 </div>
 
@@ -135,7 +135,7 @@ footer{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;color:
     <div class="status" id="pStatus" aria-live="assertive"></div>
     <button class="big" id="buzzBtn" disabled>BUZZ</button>
     <p class="note" id="pNote">Connecting to the big screen…</p>
-    <p class="note ver" style="font-size:12px">v3</p>
+    <p class="note ver" style="font-size:12px">v4</p>
   </div>
 </div>
 
@@ -152,7 +152,9 @@ const CLUES=[
 ];
 const PTS={easy:1,medium:2,hard:3};
 // Two independent free public relays; everything is sent through both, so either one being up is enough.
-const BROKERS=["wss://broker.hivemq.com:8884/mqtt","wss://broker.emqx.io:8084/mqtt"];
+// Three independent free public relays; everything goes through all of them, so any one being reachable is enough.
+// shiftr.io uses the normal HTTPS port (443), which works on networks that block the others' ports.
+const BROKERS=[{url:"wss://public.cloud.shiftr.io",username:"public",password:"public"},{url:"wss://broker.hivemq.com:8884/mqtt"},{url:"wss://broker.emqx.io:8084/mqtt"}];
 const NS="name-that-candy-una-v2/";
 const topicState=c=>NS+c+"/state";
 const topicUp=c=>NS+c+"/up";
@@ -167,7 +169,7 @@ const looksLikePhone=window.matchMedia("(pointer:coarse)").matches&&Math.min(scr
 const IS_PHONE=params.has("join")||(!params.has("host")&&looksLikePhone);
 const baseUrl=location.origin+location.pathname;
 function connectBroker(clientTag){
-  const cs=BROKERS.map(u=>mqtt.connect(u,{clientId:"ntc-"+clientTag+"-"+rid(8),clean:true,reconnectPeriod:2500,connectTimeout:8000,keepalive:20}));
+  const cs=BROKERS.map(b=>mqtt.connect(b.url,{clientId:"ntc-"+clientTag+"-"+rid(8),clean:true,reconnectPeriod:2500,connectTimeout:8000,keepalive:20,username:b.username,password:b.password}));
   return {
     get connected(){return cs.some(c=>c.connected)},
     on(ev,fn){cs.forEach(c=>c.on(ev,fn));return this},
@@ -355,7 +357,7 @@ function phoneConnect(){
     if(top!==topicState(P.code))return;
     const raw=msg.toString();if(!raw){P.state=null;$("pNote").textContent="The big screen closed this game.";renderPhone();return}
     let d;try{d=JSON.parse(raw)}catch(e){return}
-    if(!d||!Array.isArray(d.teams)||Date.now()-(d.ts||0)>30000)return;
+    if(!d||!Array.isArray(d.teams))return;
     P.lastTs=Date.now();
     if(Array.isArray(d.kicked)&&d.kicked.includes(P.id))return stopPhone("The host removed this phone from the game.");
     const mine=d.claims&&typeof d.claims[P.id]==="number"?d.claims[P.id]:null;
@@ -370,7 +372,10 @@ function phoneConnect(){
     send({type:"hello",team:P.team});
     if(P.client.connected&&Date.now()-P.lastTs>15000){P.state=null;renderPhone();$("pNote").textContent="Can't find that game. Check the code on the big screen."}
   },5000);
-  setTimeout(()=>{if(!P.state&&!P.stopped)$("pNote").textContent="Can't find that game. Check the code on the big screen."},6000);
+  setTimeout(()=>{if(P.state||P.stopped)return;
+    $("pNote").textContent=P.client.connected
+      ?"Connected, but can't find game "+P.code+". Make sure the big screen is open and shows this code."
+      :"Can't reach the buzzer service on this network. Try switching your phone between Wi-Fi and cellular.";},8000);
 }
 function renderPhone(){
   if(P.stopped)return;
